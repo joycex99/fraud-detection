@@ -10,3 +10,5 @@ pom.xml.asc
 .hgignore
 .hg/
 /resources/creditcard.csv
+training.log
+trained-network.nippy
