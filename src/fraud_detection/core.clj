@@ -8,6 +8,7 @@
            [cortex.nn.execute :as execute]
            [cortex.optimize.adadelta :as adadelta]
            [cortex.optimize.adam :as adam]
+           [cortex.metrics :as metrics]
            [cortex.tree :as tree]
            [cortex.loss :as loss]
            [cortex.util :as util]))
@@ -23,28 +24,33 @@
 (def network-file "trained-network.nippy")
 
 (def params
-  {:train-test-split  0.8
+  {:test-ds-size      50000 ;; total = 284807, test-ds ~= 17.5%
    :optimizer         (adam/adam)   ;; alternately, (adadelta/adadelta)
-   :batch-size        10
-   :epoch-count       40
-   :epoch-size        160000})
+   :batch-size        100
+   :epoch-count       100
+   :epoch-size        200000})
 
-(defn label->vec
+(defn label->vec ;; (label->vec [:a :b :c :d] :b) => [0 1 0 0]
  [class-names label]
  (let [num-classes (count class-names)
-       src-vec (vec (repeat num-classes 0))
-       class-name->index (into {} (map-indexed (comp vec reverse list) class-names))]
-   (assoc src-vec (class-name->index label) 1)))
+       src-vec (vec (repeat num-classes 0))]
+   (assoc src-vec (.indexOf class-names label) 1)))
+
+(defn vec->label ;; (vec->label [:a :b :c :d] [0.1 0.2 0.6 0.1] => :c)
+  [class-names label-vec]
+  (let [max-idx (util/max-index label-vec)]
+    (nth class-names max-idx)))
 
 (defonce create-dataset
   (memoize
     (fn []
       (let [credit-data (with-open [infile (io/reader orig-data-file)]
                           (rest (doall (csv/read-csv infile))))
-            cropped-credit-data (drop-last 7 credit-data)
-            data (mat/matrix (map #(mapv read-string %) (mapv drop-last cropped-credit-data)))
-            labels (mat/matrix (map #(label->vec [0 1] (read-string %)) (map last cropped-credit-data)))]
+            data (mat/matrix (map #(mapv read-string %) (map drop-last credit-data)))
+            labels (mat/matrix (map #(label->vec [0 1] (read-string %)) (map last credit-data)))]
         [data labels]))))
+
+
 
 (defn make-infinite
   "Create endless stream of shuffled dataset"
@@ -56,8 +62,8 @@
     (fn []
       (let [[data labels] (create-dataset)
             dataset (shuffle (mapv (fn [d l] {:data d :label l}) data labels))
-            train-ds (take (int (* (count dataset) (:train-test-split params))) dataset)
-            test-ds (drop (int (* (count dataset) (:train-test-split params))) dataset)] ; [{:data [1.3, 2.9...], :label 0}...]
+            train-ds (drop-last (:test-ds-size params) dataset)
+            test-ds (take-last (:test-ds-size params) dataset)] ; [{:data [1.3, 2.9...], :label 0}...]
         [train-ds test-ds]))))
 
 
@@ -74,7 +80,6 @@
   (let [[data labels] (create-dataset)]
     (tree/random-forest data labels {:n-trees num-trees
                                      :split-fn tree/best-splitter})))
-
 
 
 (defn log
@@ -94,6 +99,22 @@
   (/ 1 (+ 1 (Math/pow (Math/E) (- x)))))
 
 
+;; false positive ok
+;; false negative bad (fraud happens)
+;; => emphasize recall
+(defn f-beta
+  "F-beta score, default uses F1"
+  ([precision recall] (f-beta precision recall 1))
+  ([precision recall beta]
+    (let [beta-squared (* beta beta)]
+      (* (+ 1 beta-squared)
+         (try                         ;; catch divide by 0 errors
+           (/ (* precision recall)
+              (+ (* beta-squared precision) recall))
+         (catch ArithmeticException e
+           0))))))
+
+
 (def high-score* (atom {:test-score 0 :train-score 0}))
 
 (defn train
@@ -103,7 +124,8 @@
   (let [context (execute/compute-context)] ; determines context for gpu/cpu training
     (execute/with-compute-context
       context
-      (let [[train-ds test-ds] (get-train-test)
+      (let [[train-orig test-ds] (get-train-test)
+            train-ds (take (:epoch-size params) (shuffle train-orig))
             network (network/linear-network network-description)]
             (reduce (fn [[network optimizer] epoch]
                         (let [{:keys [network optimizer]} (execute/train network train-ds
@@ -112,13 +134,34 @@
                                                                         :optimizer optimizer)
                               test-results  (execute/run network test-ds :context context
                                                                          :batch-size (:batch-size params))
-                              test-score    (loss/evaluate-softmax (map :label test-results) (map :label test-ds)) ;; change
-                              train-results (execute/run network (take (count test-ds) train-ds) :context context
-                                                                                                 :batch-size (:batch-size params))
-                              train-score   (loss/evaluate-softmax (map :label train-results) (map :label (take (count test-ds) train-ds)))]
-                            (log (str "Epoch: " (inc epoch) " | test score: " test-score " | training score: " train-score))
-                            (when (> test-score (:test-score @high-score*))
-                                  (reset! high-score* {:test-score test-score :train-score train-score})
+                              ;;; test metrics
+                              test-actual (vec (map #(vec->label [0 1] %) (map :label test-ds)))
+                              test-pred (vec (map #(vec->label [0 1] %) (map :label test-results)))
+
+                              test-precision (metrics/precision test-actual test-pred)
+                              test-recall (metrics/recall test-actual test-pred)
+                              test-f-beta (f-beta test-precision test-recall)
+                              ]
+
+                              ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+                              ; train-results (execute/run network (take (count test-ds) train-ds) :context context
+                              ;                                                                    :batch-size (:batch-size params))
+                              ; ;;; train metrics
+                              ; train-actual (vec (map #(vec->label [0 1] %) (map :label (take (count test-ds) train-ds))))
+                              ; train-pred (vec (map #(vec->label [0 1] %) (map :label (take (count test-ds) train-results))))
+                              ;
+                              ; train-precision (metrics/precision train-actual train-pred)
+                              ; train-recall (metrics/recall train-actual train-pred)
+                              ; train-f-beta (f-beta train-precision train-recall)]
+
+                            (log (str "Epoch: " (inc epoch) "\n"
+                                      "Test precision: " test-precision "\n" ;; "              | Train precision: " train-precision
+                                      "Test recall: " test-recall "\n"       ;; "              | Train recall: " train-recall
+                                      "Test F1: " test-f-beta "\n\n"))       ;; "              | Train F1: " train-f-beta
+
+                            (when (> test-f-beta (:test-score @high-score*))
+                                  (reset! high-score* {:test-score test-f-beta :train-score 0})
                                   (save network))
                             [network optimizer]))
                 [network (:optimizer params)]
