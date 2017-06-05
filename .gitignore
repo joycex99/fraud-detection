@@ -12,6 +12,6 @@ pom.xml.asc
 /resources/creditcard.csv
 training.log
 training-old.log
-trained-network.nippy
-
+trained-network*
+results
 hs_err_pid*
