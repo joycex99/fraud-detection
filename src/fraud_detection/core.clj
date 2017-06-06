@@ -21,9 +21,9 @@
 (def params
   {:test-ds-size      50000 ;; total = 284807, test-ds ~= 17.5%
    :optimizer         (adam/adam)   ;; alternately, (adadelta/adadelta)
-   :batch-size        200
+   :batch-size        100
    :epoch-count       100
-   :epoch-size        200000})
+   :epoch-size        180000})
 
 (defn label->vec ;; (label->vec [:a :b :c :d] :b) => [0 1 0 0]
  [class-names label]
@@ -55,13 +55,18 @@
 ;; "Returns vector of [train-dataset-map, test-dataset-map] where each map has {:data [...], :label [..]}"
 (defonce get-train-test-dataset
   (memoize
-    (fn []
+    (fn [& {:keys [downsample] :or {downsample false}}]
       (let [dataset (shuffle (create-dataset))
             {positives true negatives false} (group-by #(= (:label %) [0 1]) dataset)
             test-pos-amount (int (* (count positives) (/ (:test-ds-size params) (count dataset)))) ;86
             test-neg-amount (- (:test-ds-size params) test-pos-amount)
             test-set (into [] (concat (take test-pos-amount positives) (take test-neg-amount negatives)))
-            train-set (into [] (concat (drop test-pos-amount positives) (drop test-neg-amount negatives)))]
+            ;; downsample adjustment
+            downsampled-train-negs (if downsample
+                                      (drop (* 2 test-neg-amount) negatives) ;; arbitrary amount -> FIXME
+                                      (drop test-neg-amount negatives))
+
+            train-set (into [] (concat (drop test-pos-amount positives) downsampled-train-negs))]
         [(shuffle train-set) (shuffle test-set)]))))
 
 ;; for random forest
@@ -70,9 +75,9 @@
     (fn [type]
       (let [[train-ds test-ds] (get-train-test-dataset)
             train-data (mat/matrix (map #(:data %) train-ds))
-            train-labels (mat/matrix (map #(:label %) train-ds))
+            train-labels (mat/matrix (map #(vec->label [0 1] (:label %)) train-ds))
             test-data (mat/matrix (map #(:data %) test-ds))
-            test-labels (mat/matrix (map #(:label %) test-ds))]
+            test-labels (mat/matrix (map #(vec->label [0 1] (:label %)) test-ds))]
         (if (= type :train)
           [train-data train-labels]
           [test-data test-labels])))))
@@ -80,8 +85,9 @@
 
 (def network-description
   [(layers/input (count (:data (first (create-dataset)))) 1 1 :id :data) ;width, height, channels, args
-  (layers/linear->relu 20) ; num-output & args
-  (layers/linear->relu 10)
+  (layers/linear->relu 15) ; num-output & args
+  ;;(layers/dropout 0.9)
+  (layers/linear->relu 8)
   (layers/linear 2)
   (layers/softmax :id :label)])
 
@@ -137,15 +143,23 @@
 
 (def high-score* (atom {:test-score 0 :train-score 0}))
 
+;; Testing only purposes
+(defn get-true-pos-false-pos
+  [y y_hat]
+  (let [true-pos-count (mat/esum (metrics/true-positives y y_hat))
+        false-pos-count (mat/esum (metrics/false-positives y y_hat))]
+    [true-pos-count false-pos-count]))
+
 (defn train
   "Train the network for epoch-count epochs, saving the best results as we go."
   []
   (log "________________________________________________________")
   (log params)
+  (log (str network-description))
   (let [context (execute/compute-context)] ; determines context for gpu/cpu training
     (execute/with-compute-context
       context
-      (let [[train-orig test-ds] (get-train-test-dataset)
+      (let [[train-orig test-ds] (get-train-test-dataset :downsample true)
             train-ds (take (:epoch-size params) (shuffle train-orig))
             network (network/linear-network network-description)]
             (reduce (fn [[network optimizer] epoch]
@@ -179,8 +193,11 @@
 
                             (log (str "Epoch: " (inc epoch) "\n"
                                       "Test precision: " test-precision "              | Train precision: " train-precision "\n" ;; "              | Train precision: " train-precision
-                                      "Test recall: " test-recall "              | Train recall: " train-recall "\n"       ;; "              | Train recall: " train-recall
-                                      "Test F1: " test-f-beta "              | Train F1: " train-f-beta "\n\n"))       ;; "              | Train F1: " train-f-beta
+                                      (if (Double/isNaN test-precision)
+                                          (str "[True pos, false pos]: "(get-true-pos-false-pos test-actual test-pred) "\n")
+                                          nil)
+                                      "Test recall: " test-recall "                | Train recall: " train-recall "\n"       ;; "              | Train recall: " train-recall
+                                      "Test F1: " test-f-beta "                   | Train F1: " train-f-beta "\n\n"))       ;; "              | Train F1: " train-f-beta
 
                             (when (> test-f-beta (:test-score @high-score*))
                                   (reset! high-score* {:test-score test-f-beta :train-score 0})
