@@ -3,6 +3,7 @@
            [clojure.string :as string]
            [clojure.data.csv :as csv]
            [clojure.core.matrix :as mat]
+           [clojure.core.matrix.stats :as matstats]
            [cortex.nn.layers :as layers]
            [cortex.nn.network :as network]
            [cortex.nn.execute :as execute]
@@ -22,7 +23,7 @@
   {:test-ds-size      50000 ;; total = 284807, test-ds ~= 17.5%
    :optimizer         (adam/adam)   ;; alternately, (adadelta/adadelta)
    :batch-size        100
-   :epoch-count       100
+   :epoch-count       80
    :epoch-size        200000})
 
 (defn label->vec
@@ -33,10 +34,22 @@
     (assoc src-vec (.indexOf class-names label) 1)))
 
 (defn vec->label
-  "Map vector of probabilities to original class (vec->label [:a :b :c :d] [0.1 0.2 0.6 0.1] => :c)"
-  [class-names label-vec]
-  (let [max-idx (util/max-index label-vec)]
-    (nth class-names max-idx)))
+  "Map vector of probabilities to original class (vec->label [:a :b :c :d] [0.1 0.2 0.6 0.1] => :c)
+
+   If class-threshold (vector of [class-name, threshold] provided, if the label-vec's class is the same as the provided class-name,
+      the label-vec's max-value has to be greater than the threshold. Else, returns next largest class."
+  [class-names label-vec & [class-threshold]]
+  (let [max-idx (util/max-index label-vec)
+        max-class (get class-names max-idx)]
+    (if class-threshold
+      (let [[class threshold] class-threshold
+            max-val (apply max label-vec)]
+        (if (and (= class max-class) (< max-val threshold))
+          (let [next-max (util/max-index (assoc label-vec max-idx 0))]
+            (nth class-names next-max))
+          max-class))
+      max-class)))
+
 
 ;; "Read input csv and create a vector of maps {:data [...] :label [..]}, where each map represents one instance"
 (defonce create-dataset
@@ -91,6 +104,16 @@
         dists (for [p pos-data n neg-data] (mat/distance p n))]
     (time (apply min dists))))
 
+;; "Get variance for each feature in positive dataset and scale it by the given factor"
+(defonce get-scaled-variances
+  (memoize
+    (fn []
+      (let [{positives true negatives false} (group-by #(= (:label %) [0 1]) (create-dataset))
+            pos-data (mat/matrix (map #(:data %) positives))
+            variances (mat/matrix (map #(matstats/variance %) (mat/columns pos-data)))
+            scaled-vars (mat/mul (/ 10 (mat/length variances)) variances)]
+        (map (fn [var] (if (>= var 0.01) var 0.01)) scaled-vars)))))
+
 
 (defn add-rand-vec
   "Take vector v and add a random vector with elements between 0 and epsilon"
@@ -98,6 +121,14 @@
   (let [len (count v)
         randv (take len (repeatedly #(- (* 2 (rand epsilon)) epsilon)))]
     (mapv + v randv)))
+
+
+(defn add-rand-variance
+  "Take vector v and add random vector based on the variance of each feature in the positive dataset"
+  [v scaled-vars]
+  (let [randv (map #(- (* 2 (rand %)) %) scaled-vars)]
+    (mapv + v randv)))
+
 
 (defn augment-train-ds
   "Takes train dataset and augments positive examples to reach 50/50 balance"
@@ -107,16 +138,16 @@
         num-augments (- (count train-neg) (count train-pos))
         augments-per-sample (int (/ num-augments (count train-pos)))
 
-        augmented-data (apply concat (repeatedly augments-per-sample #(mapv (fn [p] (add-rand-vec p 0.5)) pos-data)))
+        augmented-data (apply concat (repeatedly augments-per-sample #(mapv (fn [p] (add-rand-variance p (get-scaled-variances))) pos-data))) ;;(add-rand-variance p (get-scaled-variances 1))
         augmented-ds (mapv (fn [d] {:data d :label [0 1]}) augmented-data)]
     (shuffle (concat orig-train augmented-ds))))
 
 
 (def network-description
   [(layers/input (count (:data (first (create-dataset)))) 1 1 :id :data) ;width, height, channels, args
-  (layers/linear->relu 15) ; num-output & args
-  ;(layers/dropout 0.9)
-  ;(layers/linear->relu 10)
+  (layers/linear->relu 20) ; num-output & args
+  (layers/dropout 0.9)
+  (layers/linear->relu 10)
   (layers/linear 2)
   (layers/softmax :id :label)])
 
@@ -202,7 +233,7 @@
                                                                          :batch-size (:batch-size params))
                               ;;; test metrics
                               test-actual (vec (map #(vec->label [0 1] %) (map :label test-ds)))
-                              test-pred (vec (map #(vec->label [0 1] %) (map :label test-results)))
+                              test-pred (vec (map #(vec->label [0 1] % [1 0.95]) (map :label test-results)))
 
                               test-precision (metrics/precision test-actual test-pred)
                               test-recall (metrics/recall test-actual test-pred)
@@ -226,6 +257,8 @@
 
                               ]
 
+                            (println (take 10 test-results))
+                            (println " ")
                             (log (str "Epoch: " (inc epoch) "\n"
                                       "Test accuracy: " test-accuracy "              | Train accuracy: " train-accuracy "\n"
                                       "Test precision: " test-precision  "              | Train precision: " train-precision"\n"  ;; "              | Train precision: " train-precision
@@ -241,4 +274,5 @@
                             [network optimizer]))
                 [network (:optimizer params)]
                 (range (:epoch-count params)))
-              (println "Done.")))))
+              (println "Done.")
+              (log (str "Best score: " (:test-score @high-score*)))))))
