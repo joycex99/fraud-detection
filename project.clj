@@ -12,10 +12,5 @@
 
   :main fraud-detection.main
   :aot [fraud-detection.main]
-  :uberjar-name "classify-example.jar"
 
-  :clean-targets ^{:protect false} [:target-path
-                                    "figwheel_server.log"
-                                    "resources/public/out/"
-                                    "resources/public/js/app.js"]
   :repl-options {:init-ns fraud-detection.core})

@@ -10,7 +10,6 @@
            [cortex.optimize.adadelta :as adadelta]
            [cortex.optimize.adam :as adam]
            [cortex.metrics :as metrics]
-           [cortex.tree :as tree]
            [cortex.loss :as loss]
            [cortex.util :as util]))
 
@@ -23,7 +22,7 @@
   {:test-ds-size      50000 ;; total = 284807, test-ds ~= 17.5%
    :optimizer         (adam/adam)   ;; alternately, (adadelta/adadelta)
    :batch-size        100
-   :epoch-count       80
+   :epoch-count       30
    :epoch-size        200000})
 
 (defn label->vec
@@ -57,7 +56,7 @@
     (fn []
       (let [credit-data (with-open [infile (io/reader orig-data-file)]
                           (rest (doall (csv/read-csv infile))))
-            data (mapv #(mapv read-string %) (map drop-last credit-data))
+            data (mapv #(mapv read-string %) (map #(drop 1 %) (map drop-last credit-data))) ; drop label and time
             labels (mapv #(label->vec [0 1] (read-string %)) (map last credit-data))
             dataset (mapv (fn [d l] {:data d :label l}) data labels)]
         dataset))))
@@ -77,21 +76,6 @@
         [train-set test-set]))))
 
 
-;; for random forest
-; (defonce get-train-test-matrices
-;   (memoize
-;     (fn [type]
-;       (let [[train-ds test-ds] (get-train-test-dataset)
-;             train-data (mat/matrix (map #(:data %) train-ds))
-;             train-labels (mat/matrix (map #(vec->label [0 1] (:label %)) train-ds))
-;             test-data (mat/matrix (map #(:data %) test-ds))
-;             test-labels (mat/matrix (map #(vec->label [0 1] (:label %)) test-ds))]
-;         (if (= type :train)
-;           [train-data train-labels]
-;           [test-data test-labels])))))
-
-
-
 (defn calc-min-dist
   "Calculate min distance between feature vectors for positive and negative samples
 
@@ -101,7 +85,7 @@
         {positives true negatives false} (group-by #(= (:label %) [0 1]) dataset)
         pos-data (mat/matrix (map #(:data %) positives))
         neg-data (mat/matrix (map #(:data %) negatives))
-        dists (for [p pos-data n neg-data] (mat/distance p n))]
+        dists (for [p (mat/rows pos-data) n (mat/rows neg-data)] (mat/distance p n))]
     (time (apply min dists))))
 
 ;; "Get variance for each feature in positive dataset and scale it by the given factor"
@@ -111,8 +95,17 @@
       (let [{positives true negatives false} (group-by #(= (:label %) [0 1]) (create-dataset))
             pos-data (mat/matrix (map #(:data %) positives))
             variances (mat/matrix (map #(matstats/variance %) (mat/columns pos-data)))
-            scaled-vars (mat/mul (/ 10 (mat/length variances)) variances)]
-        (map (fn [var] (if (>= var 0.01) var 0.01)) scaled-vars)))))
+            scaled-vars (mat/mul (/ 5000 (mat/length variances)) variances)]
+        scaled-vars)))) ;; (map (fn [var] (if (<= var 10) var 10)) scaled-vars)
+
+;
+; (defn get-variances
+;   []
+;   (let [{positives true negatives false} (group-by #(= (:label %) [0 1]) (create-dataset))
+;         pos-data (mat/matrix (map #(:data %) positives))
+;         variances (mat/matrix (map #(matstats/variance %) (mat/columns pos-data)))
+;         scaled-vars (mat/mul (/ 100 (mat/length variances)) variances)]
+;     scaled-vars))
 
 
 (defn add-rand-vec
@@ -151,24 +144,6 @@
   (layers/linear 2)
   (layers/softmax :id :label)])
 
-(comment
-  (defn random-forest
-    [num-trees]
-    (let [[train-data train-labels] (get-train-test-matrices :train)
-          rf (tree/random-forest (mat/submatrix train-data 0 [0, 50000]) (mat/submatrix train-labels 0 [0, 50000]) {:n-trees num-trees
-                                                       :split-fn tree/best-splitter})]
-      (println "Trained random forest")
-      rf))
-
-  (defn test-random-forest
-    []
-    (let [rf (random-forest 50)
-          [test-data test-labels] (get-train-test-matrices :test)
-          pred-labels (map #(tree/forest-classify rf %) test-data)]
-      pred-labels
-  ))
-)
-
 
 (defn log
      "Print data and save to log file"
@@ -203,14 +178,7 @@
            0))))))
 
 
-(def high-score* (atom {:test-score 0 :train-score 0}))
-
-;; Testing only purposes
-(defn get-true-pos-false-pos
-  [y y_hat]
-  (let [true-pos-count (mat/esum (metrics/true-positives y y_hat))
-        false-pos-count (mat/esum (metrics/false-positives y y_hat))]
-    [true-pos-count false-pos-count]))
+(def high-score* (atom {:score 0}))
 
 (defn train
   "Train the network for epoch-count epochs, saving the best results as we go."
@@ -257,22 +225,29 @@
 
                               ]
 
-                            (println (take 10 test-results))
-                            (println " ")
                             (log (str "Epoch: " (inc epoch) "\n"
                                       "Test accuracy: " test-accuracy "              | Train accuracy: " train-accuracy "\n"
                                       "Test precision: " test-precision  "              | Train precision: " train-precision"\n"  ;; "              | Train precision: " train-precision
-                                      (if (Double/isNaN test-precision)
-                                          (str "[True pos, false pos]: "(get-true-pos-false-pos test-actual test-pred) "\n")
-                                          nil)
                                       "Test recall: " test-recall "                | Train recall: " train-recall "\n"       ;; "              | Train recall: " train-recall
                                       "Test F1: " test-f-beta "                | Train F1: " train-f-beta "\n\n"))       ;; "              | Train F1: " train-f-beta
 
-                            (when (> test-f-beta (:test-score @high-score*))
-                                  (reset! high-score* {:test-score test-f-beta :train-score 0})
+                            (when (> test-f-beta (:score @high-score*))
+                                  (reset! high-score* {:score test-f-beta})
                                   (save network))
                             [network optimizer]))
                 [network (:optimizer params)]
                 (range (:epoch-count params)))
               (println "Done.")
-              (log (str "Best score: " (:test-score @high-score*)))))))
+              (log (str "Best score: " (:score @high-score*)))))))
+
+; Epoch: 12                                                                                                                                                                                                        │  [clojure.main$load_script invokeStatic main.clj 275]
+; Test accuracy: 0.9988              | Train accuracy: 0.99592                                                                                                                                                     │  [clojure.main$init_opt invokeStatic main.clj 277]
+; Test precision: 0.9210526315789473              | Train precision: 0.9992349506744513                                                                                                                            │  [clojure.main$init_opt invoke main.clj 277]
+; Test recall: 0.813953488372093                | Train recall: 0.9926002959881605                                                                                                                                 │  [clojure.main$initialize invokeStatic main.clj 308]
+; Test F1: 0.8641975308641974                | Train F1: 0.995906573561281                                                                                                                                         │  [clojure.main$null_opt invokeStatic main.clj 342]
+;                                                                                                                                                                                                                  │  [clojure.main$null_opt invoke main.clj 339]
+;                                                                                                                                                                                                                  │  [clojure.main$main invokeStatic main.clj 421]
+; Saving network to trained-network.nippy                                                                                                                                                                          │  [clojure.main$main doInvoke main.clj 384]
+; ({:label [0.9562270641326904 0.043772898614406586]} {:label [7.737237979199563E-7 0.9999992847442627]} {:label [5.131872260477621E-9 1.0]} {:label [6.460923941631336E-6 0.9999935626983643]} {:label [0.79490858│  [clojure.lang.RestFn invoke RestFn.java 421]
+; 31642151 0.20509149134159088]} {:label [0.007240687496960163 0.9927593469619751]} {:label [0.1069692075252533 0.8930308222770691]} {:label [0.0014311647973954678 0.9985687732696533]} {:label [0.793821752071380│  [clojure.lang.Var invoke Var.java 383]
+; 6 0.20617826282978058]} {:label [0.9086882472038269 0.09131181985139847]})
