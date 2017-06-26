@@ -96,24 +96,7 @@
             pos-data (mat/matrix (map #(:data %) positives))
             variances (mat/matrix (map #(matstats/variance %) (mat/columns pos-data)))
             scaled-vars (mat/mul (/ 5000 (mat/length variances)) variances)]
-        scaled-vars)))) ;; (map (fn [var] (if (<= var 10) var 10)) scaled-vars)
-
-;
-; (defn get-variances
-;   []
-;   (let [{positives true negatives false} (group-by #(= (:label %) [0 1]) (create-dataset))
-;         pos-data (mat/matrix (map #(:data %) positives))
-;         variances (mat/matrix (map #(matstats/variance %) (mat/columns pos-data)))
-;         scaled-vars (mat/mul (/ 100 (mat/length variances)) variances)]
-;     scaled-vars))
-
-
-(defn add-rand-vec
-  "Take vector v and add a random vector with elements between 0 and epsilon"
-  [v epsilon]
-  (let [len (count v)
-        randv (take len (repeatedly #(- (* 2 (rand epsilon)) epsilon)))]
-    (mapv + v randv)))
+        scaled-vars))))
 
 
 (defn add-rand-variance
@@ -138,9 +121,9 @@
 
 (def network-description
   [(layers/input (count (:data (first (create-dataset)))) 1 1 :id :data) ;width, height, channels, args
-  (layers/linear->relu 20) ; num-output & args
-  (layers/dropout 0.9)
-  (layers/linear->relu 10)
+  (layers/linear->relu 15) ; num-output & args
+  (layers/dropout 0.95)
+  (layers/linear->relu 8)
   (layers/linear 2)
   (layers/softmax :id :label)])
 
@@ -148,7 +131,7 @@
 (defn log
      "Print data and save to log file"
      [data]
-     (spit log-file (str data "\n") :append true) ;; explain when blogging
+     (spit log-file (str data "\n") :append true)
      (println data))
 
 (defn save
@@ -156,10 +139,6 @@
      [network]
      (log (str "Saving network to " network-file))
      (util/write-nippy-file network-file network))
-
-(defn sigmoid
-  [x]
-  (/ 1 (+ 1 (Math/pow (Math/E) (- x)))))
 
 
 ;; false positive ok
@@ -200,8 +179,8 @@
                               test-results  (execute/run network test-ds :context context
                                                                          :batch-size (:batch-size params))
                               ;;; test metrics
-                              test-actual (vec (map #(vec->label [0 1] %) (map :label test-ds)))
-                              test-pred (vec (map #(vec->label [0 1] % [1 0.95]) (map :label test-results)))
+                              test-actual (mapv #(vec->label [0 1] %) (map :label test-ds))
+                              test-pred (mapv #(vec->label [0 1] % [1 0.95]) (map :label test-results))
 
                               test-precision (metrics/precision test-actual test-pred)
                               test-recall (metrics/recall test-actual test-pred)
@@ -214,22 +193,21 @@
                               train-results (execute/run network (take (:test-ds-size params) train-ds) :context context
                                                                                                  :batch-size (:batch-size params))
                               ;;; train metrics
-                              train-actual (vec (map #(vec->label [0 1] %) (map :label (take (count test-ds) train-ds))))
-                              train-pred (vec (map #(vec->label [0 1] %) (map :label (take (count test-ds) train-results))))
+                              train-actual (mapv #(vec->label [0 1] %) (map :label (take (count test-ds) train-ds)))
+                              train-pred (mapv #(vec->label [0 1] %) (map :label (take (count test-ds) train-results)))
 
                               train-precision (metrics/precision train-actual train-pred)
                               train-recall (metrics/recall train-actual train-pred)
                               train-f-beta (f-beta train-precision train-recall)
 
                               train-accuracy (loss/evaluate-softmax (map :label train-results) (map :label (take (:test-ds-size params) train-ds)))
-
                               ]
 
                             (log (str "Epoch: " (inc epoch) "\n"
-                                      "Test accuracy: " test-accuracy "              | Train accuracy: " train-accuracy "\n"
-                                      "Test precision: " test-precision  "              | Train precision: " train-precision"\n"  ;; "              | Train precision: " train-precision
-                                      "Test recall: " test-recall "                | Train recall: " train-recall "\n"       ;; "              | Train recall: " train-recall
-                                      "Test F1: " test-f-beta "                | Train F1: " train-f-beta "\n\n"))       ;; "              | Train F1: " train-f-beta
+                                      "Test accuracy: " test-accuracy "         | Train accuracy: " train-accuracy "\n"
+                                      "Test precision: " test-precision  "      | Train precision: " train-precision"\n"
+                                      "Test recall: " test-recall "             | Train recall: " train-recall "\n"
+                                      "Test F1: " test-f-beta "                 | Train F1: " train-f-beta "\n\n"))
 
                             (when (> test-f-beta (:score @high-score*))
                                   (reset! high-score* {:score test-f-beta})
@@ -237,17 +215,5 @@
                             [network optimizer]))
                 [network (:optimizer params)]
                 (range (:epoch-count params)))
-              (println "Done.")
-              (log (str "Best score: " (:score @high-score*)))))))
-
-; Epoch: 12                                                                                                                                                                                                        │  [clojure.main$load_script invokeStatic main.clj 275]
-; Test accuracy: 0.9988              | Train accuracy: 0.99592                                                                                                                                                     │  [clojure.main$init_opt invokeStatic main.clj 277]
-; Test precision: 0.9210526315789473              | Train precision: 0.9992349506744513                                                                                                                            │  [clojure.main$init_opt invoke main.clj 277]
-; Test recall: 0.813953488372093                | Train recall: 0.9926002959881605                                                                                                                                 │  [clojure.main$initialize invokeStatic main.clj 308]
-; Test F1: 0.8641975308641974                | Train F1: 0.995906573561281                                                                                                                                         │  [clojure.main$null_opt invokeStatic main.clj 342]
-;                                                                                                                                                                                                                  │  [clojure.main$null_opt invoke main.clj 339]
-;                                                                                                                                                                                                                  │  [clojure.main$main invokeStatic main.clj 421]
-; Saving network to trained-network.nippy                                                                                                                                                                          │  [clojure.main$main doInvoke main.clj 384]
-; ({:label [0.9562270641326904 0.043772898614406586]} {:label [7.737237979199563E-7 0.9999992847442627]} {:label [5.131872260477621E-9 1.0]} {:label [6.460923941631336E-6 0.9999935626983643]} {:label [0.79490858│  [clojure.lang.RestFn invoke RestFn.java 421]
-; 31642151 0.20509149134159088]} {:label [0.007240687496960163 0.9927593469619751]} {:label [0.1069692075252533 0.8930308222770691]} {:label [0.0014311647973954678 0.9985687732696533]} {:label [0.793821752071380│  [clojure.lang.Var invoke Var.java 383]
-; 6 0.20617826282978058]} {:label [0.9086882472038269 0.09131181985139847]})
+            (println "Done.")
+            (log (str "Best score: " (:score @high-score*)))))))
