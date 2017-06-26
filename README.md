@@ -4,11 +4,4 @@ A credit card fraud detection project built with the Cortex library.
 
 ## Usage
 
-TODO
-
-## License
-
-Copyright © 2017 
-
-Distributed under the Eclipse Public License either version 1.0 or (at
-your option) any later version.
+To run: install java and leiningen, clone the project, run `lein repl` at the root of the project, and then run `(train)` in the REPL once it loads.

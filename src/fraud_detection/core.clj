@@ -10,7 +10,7 @@
            [cortex.optimize.adadelta :as adadelta]
            [cortex.optimize.adam :as adam]
            [cortex.metrics :as metrics]
-           [cortex.loss :as loss]
+           [cortex.loss.softmax :as softmax-loss]
            [cortex.util :as util]))
 
 
@@ -114,7 +114,8 @@
         num-augments (- (count train-neg) (count train-pos))
         augments-per-sample (int (/ num-augments (count train-pos)))
 
-        augmented-data (apply concat (repeatedly augments-per-sample #(mapv (fn [p] (add-rand-variance p (get-scaled-variances))) pos-data))) ;;(add-rand-variance p (get-scaled-variances 1))
+        augmented-data (apply concat (repeatedly augments-per-sample
+                                                #(mapv (fn [p] (add-rand-variance p (get-scaled-variances))) pos-data)))
         augmented-ds (mapv (fn [d] {:data d :label [0 1]}) augmented-data)]
     (shuffle (concat orig-train augmented-ds))))
 
@@ -122,7 +123,7 @@
 (def network-description
   [(layers/input (count (:data (first (create-dataset)))) 1 1 :id :data) ;width, height, channels, args
   (layers/linear->relu 15) ; num-output & args
-  (layers/dropout 0.95)
+  (layers/dropout 0.9)
   (layers/linear->relu 8)
   (layers/linear 2)
   (layers/softmax :id :label)])
@@ -186,7 +187,7 @@
                               test-recall (metrics/recall test-actual test-pred)
                               test-f-beta (f-beta test-precision test-recall)
 
-                              test-accuracy (loss/evaluate-softmax (map :label test-results) (map :label test-ds))
+                              test-accuracy (softmax-loss/evaluate-softmax (map :label test-results) (map :label test-ds))
 
                               ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -200,7 +201,7 @@
                               train-recall (metrics/recall train-actual train-pred)
                               train-f-beta (f-beta train-precision train-recall)
 
-                              train-accuracy (loss/evaluate-softmax (map :label train-results) (map :label (take (:test-ds-size params) train-ds)))
+                              train-accuracy (softmax-loss/evaluate-softmax (map :label train-results) (map :label (take (:test-ds-size params) train-ds)))
                               ]
 
                             (log (str "Epoch: " (inc epoch) "\n"
