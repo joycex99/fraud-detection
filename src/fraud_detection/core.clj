@@ -25,12 +25,6 @@
    :epoch-count       30
    :epoch-size        200000})
 
-(defn label->vec
-"One-hot vector transformations (label->vec [:a :b :c :d] :b) => [0 1 0 0]"
-  [class-names label]
-  (let [num-classes (count class-names)
-        src-vec (vec (repeat num-classes 0))]
-    (assoc src-vec (.indexOf class-names label) 1)))
 
 (defn vec->label
   "Map vector of probabilities to original class (vec->label [:a :b :c :d] [0.1 0.2 0.6 0.1] => :c)
@@ -57,7 +51,7 @@
       (let [credit-data (with-open [infile (io/reader orig-data-file)]
                           (rest (doall (csv/read-csv infile))))
             data (mapv #(mapv read-string %) (map #(drop 1 %) (map drop-last credit-data))) ; drop label and time
-            labels (mapv #(label->vec [0 1] (read-string %)) (map last credit-data))
+            labels (mapv #(util/idx->one-hot (read-string %) 2) (map last credit-data))
             dataset (mapv (fn [d l] {:data d :label l}) data labels)]
         dataset))))
 
@@ -68,7 +62,7 @@
   (memoize
     (fn []
       (let [dataset (shuffle (create-dataset))
-            {positives true negatives false} (group-by #(= (:label %) [0 1]) dataset)
+            {positives true negatives false} (group-by #(= (:label %) [0.0 1.0]) dataset)
             test-pos-amount (int (* (count positives) (/ (:test-ds-size params) (count dataset)))) ;86
             test-neg-amount (- (:test-ds-size params) test-pos-amount)
             test-set (into [] (concat (take test-pos-amount positives) (take test-neg-amount negatives)))
@@ -82,7 +76,7 @@
   Result: Elapsed time: 1696027.647549 msecs  │  3.598395571684021"
   []
   (let [dataset (shuffle (create-dataset))
-        {positives true negatives false} (group-by #(= (:label %) [0 1]) dataset)
+        {positives true negatives false} (group-by #(= (:label %) [0.0 1.0]) dataset)
         pos-data (mat/matrix (map #(:data %) positives))
         neg-data (mat/matrix (map #(:data %) negatives))
         dists (for [p (mat/rows pos-data) n (mat/rows neg-data)] (mat/distance p n))]
@@ -92,7 +86,7 @@
 (defonce get-scaled-variances
   (memoize
     (fn []
-      (let [{positives true negatives false} (group-by #(= (:label %) [0 1]) (create-dataset))
+      (let [{positives true negatives false} (group-by #(= (:label %) [0.0 1.0]) (create-dataset))
             pos-data (mat/matrix (map #(:data %) positives))
             variances (mat/matrix (map #(matstats/variance %) (mat/columns pos-data)))
             scaled-vars (mat/mul (/ 5000 (mat/length variances)) variances)]
@@ -109,14 +103,14 @@
 (defn augment-train-ds
   "Takes train dataset and augments positive examples to reach 50/50 balance"
   [orig-train]
-  (let [{train-pos true train-neg false} (group-by #(= (:label %) [0 1]) orig-train)
+  (let [{train-pos true train-neg false} (group-by #(= (:label %) [0.0 1.0]) orig-train)
         pos-data (map #(:data %) train-pos)
         num-augments (- (count train-neg) (count train-pos))
         augments-per-sample (int (/ num-augments (count train-pos)))
 
         augmented-data (apply concat (repeatedly augments-per-sample
                                                 #(mapv (fn [p] (add-rand-variance p (get-scaled-variances))) pos-data)))
-        augmented-ds (mapv (fn [d] {:data d :label [0 1]}) augmented-data)]
+        augmented-ds (mapv (fn [d] {:data d :label [0.0 1.0]}) augmented-data)]
     (shuffle (concat orig-train augmented-ds))))
 
 
@@ -180,8 +174,8 @@
                               test-results  (execute/run network test-ds :context context
                                                                          :batch-size (:batch-size params))
                               ;;; test metrics
-                              test-actual (mapv #(vec->label [0 1] %) (map :label test-ds))
-                              test-pred (mapv #(vec->label [0 1] % [1 0.95]) (map :label test-results))
+                              test-actual (mapv #(vec->label [0.0 1.0] %) (map :label test-ds))
+                              test-pred (mapv #(vec->label [0.0 1.0] % [1 0.95]) (map :label test-results))
 
                               test-precision (metrics/precision test-actual test-pred)
                               test-recall (metrics/recall test-actual test-pred)
@@ -194,8 +188,8 @@
                               train-results (execute/run network (take (:test-ds-size params) train-ds) :context context
                                                                                                  :batch-size (:batch-size params))
                               ;;; train metrics
-                              train-actual (mapv #(vec->label [0 1] %) (map :label (take (count test-ds) train-ds)))
-                              train-pred (mapv #(vec->label [0 1] %) (map :label (take (count test-ds) train-results)))
+                              train-actual (mapv #(vec->label [0.0 1.0] %) (map :label (take (count test-ds) train-ds)))
+                              train-pred (mapv #(vec->label [0.0 1.0] %) (map :label (take (count test-ds) train-results)))
 
                               train-precision (metrics/precision train-actual train-pred)
                               train-recall (metrics/recall train-actual train-pred)
