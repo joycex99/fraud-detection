@@ -10,8 +10,9 @@
            [cortex.optimize.adadelta :as adadelta]
            [cortex.optimize.adam :as adam]
            [cortex.metrics :as metrics]
-           [cortex.loss.softmax :as softmax-loss]
-           [cortex.util :as util]))
+           [cortex.util :as util]
+           [cortex.experiment.util :as experiment-util]
+           [cortex.experiment.train :as experiment-train]))
 
 
 (def orig-data-file "resources/creditcard.csv")
@@ -89,7 +90,7 @@
       (let [{positives true negatives false} (group-by #(= (:label %) [0.0 1.0]) (create-dataset))
             pos-data (mat/matrix (map #(:data %) positives))
             variances (mat/matrix (map #(matstats/variance %) (mat/columns pos-data)))
-            scaled-vars (mat/mul (/ 5000 (mat/length variances)) variances)]
+            scaled-vars (mat/mul (/ 10000 (mat/length variances)) variances)]
         scaled-vars))))
 
 
@@ -116,9 +117,9 @@
 
 (def network-description
   [(layers/input (count (:data (first (create-dataset)))) 1 1 :id :data) ;width, height, channels, args
-  (layers/linear->relu 15) ; num-output & args
-  (layers/dropout 0.9)
-  (layers/linear->relu 8)
+  (layers/linear->relu 20) ; num-output & args
+  (layers/dropout 0.85)
+  (layers/linear->relu 10)
   (layers/linear 2)
   (layers/softmax :id :label)])
 
@@ -128,12 +129,6 @@
      [data]
      (spit log-file (str data "\n") :append true)
      (println data))
-
-(defn save
-     "Save the network to a nippy file."
-     [network]
-     (log (str "Saving network to " network-file))
-     (util/write-nippy-file network-file network))
 
 
 ;; false positive ok
@@ -152,10 +147,66 @@
            0))))))
 
 
-(def high-score* (atom {:score 0}))
+
+(defn f1-test-fn
+  "Test function that takes in two map arguments, global info and local epoch info.
+   Compares F1 score of current network to that of the previous network, and returns map:
+    {:best-network? boolean
+     :network (assoc new-network :evaluation-score-to-compare)}"
+  [;; global arguments
+   {:keys [batch-size context]}
+   ;per-epoch arguments
+   {:keys [new-network old-network test-ds]} ]
+  (let [batch-size (long batch-size)
+        test-results (execute/run new-network test-ds
+                                 :batch-size batch-size
+                                 :loss-outputs? true
+                                 :context context)
+         ;;; test metrics
+         test-actual (mapv #(vec->label [0.0 1.0] %) (map :label test-ds))
+         test-pred (mapv #(vec->label [0.0 1.0] % [1 0.9]) (map :label test-results))
+
+         precision (metrics/precision test-actual test-pred)
+         recall (metrics/recall test-actual test-pred)
+         f-beta (f-beta precision recall)
+
+         ;; if current f-beta higher than the old network's, current is best network
+         best-network? (or (nil? (get old-network :cv-score))
+                          (> f-beta (get old-network :cv-score)))
+         updated-network (assoc new-network :cv-score f-beta)
+         epoch (get new-network :epoch-count)]
+
+    (experiment-train/save-network updated-network network-file)
+    (log (str "Epoch: " epoch "\n"
+              "Precision: " precision  "\n"
+              "Recall: " recall "\n"
+              "F1: " f-beta "\n\n"))
+    {:best-network? best-network?
+     :network updated-network}))
+
 
 (defn train
-  "Train the network for epoch-count epochs, saving the best results as we go."
+  "Trains network for :epoch-count number of epochs"
+  []
+  (let [network (network/linear-network network-description)
+        [train-orig test-ds] (get-train-test-dataset)
+        augmented-train (shuffle (augment-train-ds train-orig))
+        train-ds (experiment-util/infinite-class-balanced-dataset augmented-train
+                                            :class-key :label
+                                            :epoch-size (:epoch-size params))]
+    (experiment-train/train-n network train-ds test-ds
+                                      :batch-size (:batch-size params)
+                                      :epoch-count (:epoch-count params)
+                                      :optimizer (:optimizer params)
+                                      :test-fn f1-test-fn)))
+
+
+
+(def high-score* (atom {:score 0}))
+
+(defn train-low-level
+  "Example low-level training function. Here, the compute context (CPU/GPU) is established, and
+   a reduce function continuously trains and updates the network for the specified number of epochs"
   []
   (log "________________________________________________________")
   (log params)
@@ -181,8 +232,6 @@
                               test-recall (metrics/recall test-actual test-pred)
                               test-f-beta (f-beta test-precision test-recall)
 
-                              test-accuracy (softmax-loss/evaluate-softmax (map :label test-results) (map :label test-ds))
-
                               ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
                               train-results (execute/run network (take (:test-ds-size params) train-ds) :context context
@@ -195,18 +244,16 @@
                               train-recall (metrics/recall train-actual train-pred)
                               train-f-beta (f-beta train-precision train-recall)
 
-                              train-accuracy (softmax-loss/evaluate-softmax (map :label train-results) (map :label (take (:test-ds-size params) train-ds)))
                               ]
 
                             (log (str "Epoch: " (inc epoch) "\n"
-                                      "Test accuracy: " test-accuracy "         | Train accuracy: " train-accuracy "\n"
                                       "Test precision: " test-precision  "      | Train precision: " train-precision"\n"
                                       "Test recall: " test-recall "             | Train recall: " train-recall "\n"
                                       "Test F1: " test-f-beta "                 | Train F1: " train-f-beta "\n\n"))
 
                             (when (> test-f-beta (:score @high-score*))
                                   (reset! high-score* {:score test-f-beta})
-                                  (save network))
+                                  (experiment-train/save-network network network-file))
                             [network optimizer]))
                 [network (:optimizer params)]
                 (range (:epoch-count params)))

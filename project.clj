@@ -4,7 +4,8 @@
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :dependencies [[org.clojure/clojure "1.8.0"]
-                 [thinktopic/cortex "0.9.9"]
+                 [thinktopic/cortex "0.9.10"]
+                 [thinktopic/experiment "0.9.10"]
                  [org.clojure/tools.cli "0.3.5"]
                  [org.clojure/clojurescript "1.8.51"]
                  [org.bytedeco.javacpp-presets/cuda "8.0-1.2"]
